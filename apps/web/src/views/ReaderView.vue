@@ -13,6 +13,7 @@ import {
 } from '@lucide/vue'
 import {
   api,
+  formatApiError,
   type AssistantMessageItem,
   type BlockItem,
   type DocumentItem,
@@ -21,7 +22,7 @@ import {
 } from '../api/client'
 import PdfPage from '../components/PdfPage.vue'
 import NotesPanel from '../components/NotesPanel.vue'
-import AssistantPanel from '../components/AssistantPanel.vue'
+import AssistantPanel, { type AssistantContextMode } from '../components/AssistantPanel.vue'
 import { t } from '../i18n'
 
 const props = defineProps<{ id: string }>()
@@ -46,8 +47,12 @@ let syncing = false
 const railTab = ref<'notes' | 'assistant'>('notes')
 const assistantMessages = ref<AssistantMessageItem[]>([])
 const assistantSending = ref(false)
+const assistantStreaming = ref('')
 const assistantError = ref('')
-const assistantUseFull = ref(false)
+const assistantContextMode = ref<AssistantContextMode>('page')
+const notesBusy = ref(false)
+const notesError = ref('')
+let assistantAbort: AbortController | null = null
 
 const pdfUrl = computed(() => api.pdfUrl(props.id))
 const pageCount = computed(() => doc.value?.page_count || 0)
@@ -55,6 +60,13 @@ const currentBlocks = computed(() => blocksByPage.value[pageIndex.value] || [])
 const pageHighlights = computed(() =>
   highlights.value.filter((h) => h.page_index === pageIndex.value),
 )
+const selectedSnippet = computed(() => {
+  const block = selectedBlock.value
+  if (!block) return null
+  const raw = (block.translation || block.text || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return null
+  return raw.length > 120 ? `${raw.slice(0, 118)}…` : raw
+})
 const translatableBlocks = computed(() =>
   currentBlocks.value.filter(
     (b) =>
@@ -145,28 +157,74 @@ async function saveTranslation(payload: { blockId: string; text: string }) {
 async function onSelectBlock(block: BlockItem) {
   selectedBlock.value = block
   activeSyncId.value = block.id
-  const exists = highlights.value.find((h) => h.block_id === block.id)
-  if (!exists && !block.block_type.startsWith('placeholder')) {
-    const hl = await api.createHighlight(props.id, {
-      page_index: block.page_index,
-      block_id: block.id,
-    })
-    highlights.value.push(hl)
+  if (assistantContextMode.value !== 'full') {
+    assistantContextMode.value = 'block'
   }
 }
 
+function friendlyRailError(err: unknown, fallbackKey: 'notesErrGeneric' | 'assistantErrConnect'): string {
+  const detail = formatApiError(err)
+  if (/All connection attempts failed|ConnectError|ECONNREFUSED|ENOTFOUND/i.test(detail)) {
+    return t('assistantErrConnect')
+  }
+  if (/No translation provider|No provider configured/i.test(detail)) {
+    return t('assistantErrNoProvider')
+  }
+  if (/401|403|API key|Unauthorized|authentication/i.test(detail)) {
+    return t('assistantErrAuth')
+  }
+  return detail || t(fallbackKey)
+}
+
 async function addNote(content: string) {
-  const note = await api.createNote(props.id, {
-    content,
-    page_index: selectedBlock.value?.page_index ?? pageIndex.value,
-    block_id: selectedBlock.value?.id ?? null,
-  })
-  notes.value.unshift(note)
+  notesBusy.value = true
+  notesError.value = ''
+  try {
+    const note = await api.createNote(props.id, {
+      content,
+      page_index: selectedBlock.value?.page_index ?? pageIndex.value,
+      block_id: selectedBlock.value?.id ?? null,
+    })
+    notes.value.unshift(note)
+  } catch (err) {
+    notesError.value = friendlyRailError(err, 'notesErrGeneric')
+  } finally {
+    notesBusy.value = false
+  }
 }
 
 async function removeNote(noteId: string) {
-  await api.deleteNote(props.id, noteId)
-  notes.value = notes.value.filter((n) => n.id !== noteId)
+  notesBusy.value = true
+  notesError.value = ''
+  try {
+    await api.deleteNote(props.id, noteId)
+    notes.value = notes.value.filter((n) => n.id !== noteId)
+  } catch (err) {
+    notesError.value = friendlyRailError(err, 'notesErrGeneric')
+  } finally {
+    notesBusy.value = false
+  }
+}
+
+async function openNote(note: NoteItem) {
+  notesError.value = ''
+  pageIndex.value = note.page_index
+  await loadPage(note.page_index)
+  if (note.block_id) {
+    const list = blocksByPage.value[note.page_index] || []
+    const block = list.find((b) => b.id === note.block_id) || null
+    selectedBlock.value = block
+    activeSyncId.value = note.block_id
+    if (block && assistantContextMode.value !== 'full') {
+      assistantContextMode.value = 'block'
+    }
+  } else {
+    selectedBlock.value = null
+    activeSyncId.value = null
+  }
+  await nextTick()
+  const target = document.querySelector(`[data-block-id="${note.block_id}"]`)
+  target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
 }
 
 async function loadAssistant() {
@@ -174,36 +232,111 @@ async function loadAssistant() {
   assistantMessages.value = data.messages
 }
 
+function stopAssistant() {
+  assistantAbort?.abort()
+  assistantAbort = null
+  assistantSending.value = false
+}
+
 async function sendAssistant(content: string) {
+  stopAssistant()
   assistantSending.value = true
+  assistantStreaming.value = ''
   assistantError.value = ''
-  try {
-    const res = await api.chatAssistant(props.id, {
+  const mode = assistantContextMode.value
+  const blockId = mode === 'block' ? selectedBlock.value?.id ?? null : null
+  const ac = new AbortController()
+  assistantAbort = ac
+
+  // Optimistic user bubble until SSE meta arrives (dedupe by id).
+  const tempId = `temp-user-${Date.now()}`
+  assistantMessages.value = [
+    ...assistantMessages.value,
+    {
+      id: tempId,
+      role: 'user',
       content,
-      context_mode: assistantUseFull.value ? 'full' : 'auto',
+      context_mode: mode,
       page_index: selectedBlock.value?.page_index ?? pageIndex.value,
-      block_id: assistantUseFull.value ? null : selectedBlock.value?.id ?? null,
-    })
-    assistantMessages.value = [
-      ...assistantMessages.value,
-      res.user_message,
-      res.assistant_message,
-    ]
+      block_id: blockId,
+      created_at: new Date().toISOString(),
+    },
+  ]
+
+  try {
+    await api.chatAssistantStream(
+      props.id,
+      {
+        content,
+        context_mode: mode,
+        page_index: selectedBlock.value?.page_index ?? pageIndex.value,
+        block_id: blockId,
+      },
+      {
+        onUser: (msg) => {
+          assistantMessages.value = assistantMessages.value.map((m) =>
+            m.id === tempId ? msg : m,
+          )
+        },
+        onDelta: (text) => {
+          assistantStreaming.value += text
+        },
+        onDone: (msg) => {
+          assistantStreaming.value = ''
+          assistantSending.value = false
+          assistantMessages.value = [...assistantMessages.value, msg]
+        },
+        onError: (detail) => {
+          assistantStreaming.value = ''
+          assistantSending.value = false
+          assistantError.value = friendlyRailError(
+            new Error(JSON.stringify({ detail })),
+            'assistantErrConnect',
+          )
+        },
+      },
+      ac.signal,
+    )
   } catch (err) {
-    assistantError.value = err instanceof Error ? err.message : String(err)
+    if ((err as { name?: string })?.name === 'AbortError') {
+      const partial = assistantStreaming.value.trim()
+      if (partial) {
+        assistantMessages.value = [
+          ...assistantMessages.value,
+          {
+            id: `local-partial-${Date.now()}`,
+            role: 'assistant',
+            content: `${partial}\n\n…`,
+            context_mode: null,
+            page_index: null,
+            block_id: null,
+            created_at: new Date().toISOString(),
+          },
+        ]
+      }
+    } else {
+      if (assistantMessages.value.some((m) => m.id === tempId)) {
+        assistantMessages.value = assistantMessages.value.filter((m) => m.id !== tempId)
+      }
+      assistantError.value = friendlyRailError(err, 'assistantErrConnect')
+    }
   } finally {
+    if (assistantAbort === ac) assistantAbort = null
     assistantSending.value = false
+    assistantStreaming.value = ''
   }
 }
 
 async function clearAssistant() {
-  if (!assistantMessages.value.length) return
+  if (!assistantMessages.value.length && !assistantSending.value) return
+  stopAssistant()
   try {
     await api.clearAssistantMessages(props.id)
     assistantMessages.value = []
+    assistantStreaming.value = ''
     assistantError.value = ''
   } catch (err) {
-    assistantError.value = err instanceof Error ? err.message : String(err)
+    assistantError.value = friendlyRailError(err, 'assistantErrConnect')
   }
 }
 
@@ -320,6 +453,7 @@ onMounted(async () => {
           :page-index="pageIndex"
           :blocks="currentBlocks"
           :highlights="pageHighlights"
+          :selected-block-id="activeSyncId"
           mode="embedded"
           side="source"
           @select-block="onSelectBlock"
@@ -332,8 +466,9 @@ onMounted(async () => {
           <PdfPage
             :pdf-url="pdfUrl"
             :page-index="pageIndex"
-            :blocks="[]"
+            :blocks="currentBlocks"
             :highlights="pageHighlights"
+            :selected-block-id="activeSyncId"
             mode="side"
             side="source"
             @rendered="onSourceRendered"
@@ -347,6 +482,7 @@ onMounted(async () => {
             :page-index="pageIndex"
             :blocks="currentBlocks"
             :highlights="pageHighlights"
+            :selected-block-id="activeSyncId"
             :forced-width="pageSize.width"
             mode="side"
             side="translation"
@@ -386,20 +522,28 @@ onMounted(async () => {
         :notes="notes"
         :selected-block-id="selectedBlock?.id ?? null"
         :selected-page="selectedBlock?.page_index ?? pageIndex"
+        :selected-snippet="selectedSnippet"
+        :busy="notesBusy"
+        :error="notesError"
         @add="addNote"
         @remove="removeNote"
+        @open="openNote"
       />
       <AssistantPanel
         v-show="railTab === 'assistant'"
         :messages="assistantMessages"
         :sending="assistantSending"
+        :streaming-text="assistantStreaming"
         :error="assistantError"
-        :use-full-doc="assistantUseFull"
+        :context-mode="assistantContextMode"
         :selected-block-id="selectedBlock?.id ?? null"
         :selected-page="selectedBlock?.page_index ?? pageIndex"
+        :selected-snippet="selectedSnippet"
         @send="sendAssistant"
+        @stop="stopAssistant"
         @clear="clearAssistant"
-        @update:use-full-doc="assistantUseFull = $event"
+        @update:context-mode="assistantContextMode = $event"
+        @dismiss-error="assistantError = ''"
       />
     </aside>
   </div>

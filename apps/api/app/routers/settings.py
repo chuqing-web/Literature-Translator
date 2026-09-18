@@ -34,7 +34,7 @@ DEFAULT_UI = {
     "view_mode": "embedded",
     "font_family": "Source Han Serif SC, Noto Serif SC, serif",
     "font_size": 14,
-    "line_height": 1.6,
+    "line_height": 1.4,
     "active_provider_id": None,
     "locale": "zh",
 }

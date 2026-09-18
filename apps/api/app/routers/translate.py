@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.db import SessionLocal, get_db
 from app.models import Block, Document, TranslateJob, Translation
 from app.schemas import BlockOut, JobStartOut, TranslateJobOut, TranslationUpdate
+from app.services.pdf_parse import repair_wrapped_paragraph_blocks
 from app.services.translate import run_translate_job
 
 router = APIRouter(prefix="/api", tags=["translate"])
@@ -44,11 +45,13 @@ def page_blocks(
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(404, "Document not found")
+    # Heal mid-paragraph splits left by older parses / live PyMuPDF quirks.
+    repair_wrapped_paragraph_blocks(db, document_id, page_index=page_index)
     blocks = (
         db.query(Block)
         .options(joinedload(Block.translation))
         .filter(Block.document_id == document_id, Block.page_index == page_index)
-        .order_by(Block.block_index)
+        .order_by(Block.bbox_y0, Block.bbox_x0, Block.block_index)
         .all()
     )
     return [_block_out(b) for b in blocks]

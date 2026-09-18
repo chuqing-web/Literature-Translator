@@ -93,8 +93,8 @@ function fontPxFor(block: BlockItem): number {
     if (role === 'placeholder' || role === 'page_number') pt = ROLE_PT.body
     else pt = ROLE_PT[role]
   }
-  const px = pt * sy * userFontScale()
-  return Math.round(Math.min(28, Math.max(9, px)) * 10) / 10
+  const px = pt * sy * userFontScale() - 0.5
+  return Math.round(Math.min(28, Math.max(8.5, px)) * 10) / 10
 }
 
 function gapBeforePx(block: BlockItem, prev: BlockItem | null): number {

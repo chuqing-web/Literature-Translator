@@ -109,3 +109,49 @@ def test_chat_requires_provider():
             json={"content": "hi", "context_mode": "auto", "page_index": 0},
         )
     assert res.status_code == 503
+
+
+def test_chat_stream_emits_sse_and_persists():
+    doc_id = _seed_doc()
+    client = TestClient(app)
+
+    async def fake_stream(*_a, **_k):
+        for piece in ("流", "式", "回复"):
+            yield piece
+
+    with patch(
+        "app.routers.assistant.get_default_provider",
+        return_value=type(
+            "P",
+            (),
+            {
+                "base_url": "https://example.com/v1",
+                "api_key_enc": "",
+                "model": "test-model",
+                "is_full_url": False,
+            },
+        )(),
+    ), patch(
+        "app.routers.assistant.chat_completion_stream",
+        new=fake_stream,
+    ), patch("app.routers.assistant.decrypt_secret", return_value=""):
+        with client.stream(
+            "POST",
+            f"/api/documents/{doc_id}/assistant/chat/stream",
+            json={"content": "讲一下", "context_mode": "page", "page_index": 0},
+        ) as res:
+            assert res.status_code == 200, res.text
+            body = "".join(res.iter_text())
+
+    assert "data: " in body
+    assert '"type": "user"' in body or '"type":"user"' in body
+    assert '"type": "delta"' in body or '"type":"delta"' in body
+    assert '"type": "done"' in body or '"type":"done"' in body
+    assert "流式回复" in body
+
+    listed = client.get(f"/api/documents/{doc_id}/assistant/messages")
+    msgs = listed.json()["messages"]
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user"
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == "流式回复"

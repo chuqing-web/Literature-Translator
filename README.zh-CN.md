@@ -4,7 +4,14 @@
 
 面向科研人员、研究生，以及所有需要真正「读懂」文献、而不只是丢进机器翻译的人。本地优先的双语 PDF 阅读工作室：上传论文、保留原版排版、按段落对照译文、边读边批注，遇到难懂的方法节还可以直接问「论文助手」。
 
+**仓库地址：** [github.com/chuqing-web/Literature-Translator](https://github.com/chuqing-web/Literature-Translator) · [Issues](https://github.com/chuqing-web/Literature-Translator/issues) · 许可 [Apache-2.0](./LICENSE)
+
 [English](./README.md) · [中文](./README.zh-CN.md)
+
+```bash
+git clone https://github.com/chuqing-web/Literature-Translator.git
+cd Literature-Translator
+```
 
 ---
 
@@ -21,6 +28,18 @@
 左侧原文 PDF，右侧按版式对齐的中文译文；右侧栏可切换笔记与论文助手。
 
 ![阅读器 — 左右对照与页边笔记](./picture/reader-demo.png)
+
+### 服务商设置
+
+接入任意兼容 OpenAI 的接口：厂商预设、Base URL、模型、API 密钥、实际请求 URL 预览，以及翻译前的连通性测试。
+
+![设置 — 翻译服务商配置](./picture/settings-page.png)
+
+### 论文助手
+
+基于选中段落、当前页或全文提问；每篇论文一条连续线程，与笔记同栏切换。
+
+![论文助手 — 限定上下文的问答](./picture/paper-assistant.png)
 
 ---
 
@@ -123,57 +142,276 @@
 
 ## 运行环境
 
-- **Windows** 推荐使用一键脚本 `scripts/start.ps1`  
-- **Python 3.11+**（后端）  
-- **Node.js 18+**（Vite 前端）  
-- **文字型 PDF**（可选中文字）。扫描件 / 纯图 PDF 本版本会标记为不支持，尚无 OCR  
-- **兼容 OpenAI 的 API**（或本地模型服务），用于翻译与论文助手  
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| 操作系统 | 推荐 Windows 10/11 | 可一键运行 `scripts/start.ps1`；macOS / Linux 用手动步骤 |
+| Git | 2.x | 克隆仓库 |
+| Python | **3.11+**（推荐 3.11 或 3.12） | FastAPI 后端 |
+| Node.js | **18+**（推荐 20 LTS） | Vite + Vue 前端 |
+| npm | 随 Node.js 安装 | 前端依赖 |
+| PDF | **文字型**（可选中文字）学术 PDF | 扫描件 / 纯图 PDF 本版不支持（尚无 OCR） |
+| AI 接口 | 任意 **兼容 OpenAI** 的 Chat Completions | 翻译 + 论文助手（云端或本地，如 Ollama 网关） |
+
+若不想使用云端密钥，可自行准备本地模型服务。
 
 ---
 
-## 快速开始
+## 从零部署（详细流程）
 
-### 推荐方式（Windows）
+如果你是第一次在这台机器上跑本项目，请按下面逐步操作。命令默认仓库根目录为：
 
-在仓库根目录执行：
+`C:\Projects\Literature-Translator`
+
+路径不同请自行替换。macOS / Linux 使用对应 shell 命令（虚拟环境激活路径不同）。
+
+### 第 0 步 — 安装系统工具
+
+#### 0.1 Git
+
+1. 下载 Git for Windows：https://git-scm.com/download/win  
+2. 按默认选项安装。  
+3. 验证：
 
 ```powershell
+git --version
+```
+
+#### 0.2 Python 3.11+
+
+1. 从 https://www.python.org/downloads/ 下载 Python 3.11 或 3.12  
+2. **重要：** 安装时勾选 **“Add python.exe to PATH”**  
+3. 验证（任选其一）：
+
+```powershell
+python --version
+# 或
+py -3.11 --version
+```
+
+应显示 `Python 3.11.x` 或 `3.12.x`。若 `python` 指向微软商店占位程序，后续步骤请改用 `py -3.11`。
+
+#### 0.3 Node.js 18+
+
+1. 从 https://nodejs.org/ 下载 **LTS** 安装包  
+2. 默认安装（已含 npm）  
+3. 验证：
+
+```powershell
+node --version
+npm --version
+```
+
+### 第 1 步 — 获取源码
+
+若本地已有项目目录，可跳到第 2 步。
+
+```powershell
+cd C:\Projects
+git clone https://github.com/chuqing-web/Literature-Translator.git
+cd Literature-Translator
+```
+
+或将发行包解压到 `C:\Projects\Literature-Translator` 后进入该目录。
+
+确认目录结构大致如下：
+
+```text
+Literature-Translator/
+├── apps/
+│   ├── api/
+│   └── web/
+├── scripts/
+│   └── start.ps1
+├── picture/
+├── README.md
+└── README.zh-CN.md
+```
+
+### 第 2 步 — 创建数据目录（首次）
+
+运行时数据写在 `data/`（已 gitignore）。若目录不存在，先创建：
+
+```powershell
+cd "C:\Projects\Literature-Translator"
+New-Item -ItemType Directory -Force -Path .\data\library | Out-Null
+```
+
+首次启动 API 时，还会自动创建 `data/lit.db` 与本机密钥文件。
+
+### 第 3 步 — 后端：虚拟环境与 Python 依赖
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+
+# 创建虚拟环境（优先 3.11）
+py -3.11 -m venv .venv
+# 若失败可改用：
+# python -m venv .venv
+
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+确认 uvicorn 可用：
+
+```powershell
+.\.venv\Scripts\uvicorn.exe --version
+```
+
+### 第 4 步 — 前端：安装 npm 依赖
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\web"
+npm install
+```
+
+### 第 5 步 — 启动服务
+
+#### 方式 A — 一键启动（Windows，推荐）
+
+在**仓库根目录**执行：
+
+```powershell
+cd "C:\Projects\Literature-Translator"
 .\scripts\start.ps1
 ```
 
-会启动 API 与前端，并打开 **http://127.0.0.1:5173/** 。
+若 PowerShell 禁止运行脚本：
 
-**关闭浏览器标签页会自动停止前后端**（心跳 + 关闭信标）。
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
 
-若希望不依赖浏览器标签、保持进程常驻：
+然后再执行 `.\scripts\start.ps1`。
+
+脚本会：
+
+1. 若缺少 `apps/api/.venv`，则创建并安装 `requirements.txt`  
+2. 若缺少 `apps/web/node_modules`，则执行 `npm install`  
+3. 启动 API：**http://127.0.0.1:8787**  
+4. 启动前端：**http://127.0.0.1:5173**  
+5. 自动打开浏览器  
+
+**默认行为：** 关闭浏览器标签页会停止前后端（心跳 / 离开信标）。
+
+若希望不依赖浏览器标签、进程常驻：
 
 ```powershell
 $env:LT_AUTO_SHUTDOWN = "0"
 .\scripts\start.ps1
 ```
 
-### 手动启动
+#### 方式 B — 手动启动（两个终端）
 
-**后端**
+**终端 1 — API**
 
-```bash
-cd apps/api
-python3.11 -m venv .venv
-# Windows:
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8787
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+$env:LT_AUTO_SHUTDOWN = "0"
+.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8787
 ```
 
-**前端**（另开终端）
+另开窗口做健康检查：
+
+```powershell
+curl.exe http://127.0.0.1:8787/api/health
+```
+
+返回 JSON 中应包含 `"status":"ok"`。
+
+**终端 2 — 前端**
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\web"
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+浏览器打开 **http://127.0.0.1:5173/** 。
+
+#### macOS / Linux（手动）
 
 ```bash
+# 后端
+cd apps/api
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+LT_AUTO_SHUTDOWN=0 uvicorn app.main:app --host 127.0.0.1 --port 8787
+
+# 前端（第二个终端）
 cd apps/web
 npm install
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-打开 http://127.0.0.1:5173/ → **设置** 添加服务商 → **书库** 上传 PDF → **翻译** → 开始阅读。
+### 第 6 步 — 首次在界面中配置
+
+1. 打开 http://127.0.0.1:5173/  
+2. 进入 **设置**  
+3. 添加服务商：
+   - 选择厂商预设，**或**填写自定义 Base URL  
+   - 填写 **模型名** 与 **API 密钥**（本地 Ollama 类服务若忽略密钥，可填占位符）  
+   - 非标准网关可开启 **完整 URL 模式**  
+   - 点击 **测试**，再设为 **默认**  
+4. 回到 **书库** → **上传 PDF**（优先可选中文字的学术 PDF）  
+5. 打开文档 → **翻译** → 等待按块进度  
+6. 选择 **文内对照** 或 **左右对照**  
+7. 选中段落 → 使用 **笔记** 或 **论文助手**  
+
+### 第 7 步 — 验收部署是否成功
+
+| 检查项 | 方法 | 预期 |
+|--------|------|------|
+| API 存活 | `curl.exe http://127.0.0.1:8787/api/health` | `"status":"ok"` |
+| 前端存活 | 打开 http://127.0.0.1:5173/ | 书库界面正常 |
+| 服务商 | 设置 → 测试 | 成功 |
+| 解析 | 上传文字型 PDF | 状态变为可阅读 / 就绪 |
+| 翻译 | 阅读器 → 翻译 | 文本块出现目标语言译文 |
+| 本地落盘 | 查看 `data/library/` 与 `data/lit.db` | 存在 PDF 与 SQLite |
+
+### 端口与环境变量
+
+| 项目 | 默认 | 覆盖方式 |
+|------|------|----------|
+| API | `127.0.0.1:8787` | `LT_API_HOST` / `LT_API_PORT`（环境变量前缀 `LT_`） |
+| 前端（Vite） | `127.0.0.1:5173` | `npm run dev` 传 `--port` |
+| 自动关闭 | 开启 | `$env:LT_AUTO_SHUTDOWN = "0"` |
+| 数据目录 | `<仓库>/data` | `LT_DATA_DIR` |
+
+若 8787 或 5173 已被占用，请先结束占用进程或改端口。
+
+### 常见问题排查
+
+| 现象 | 可能原因 | 处理 |
+|------|----------|------|
+| 找不到 `python` / `py` | Python 未进 PATH | 重装并勾选 Add to PATH，或使用 `python.exe` 全路径 |
+| 找不到 `npm` | 未装 Node | 安装 Node.js LTS 后重开终端 |
+| 找不到 `uvicorn` | 虚拟环境未建 / 依赖未装 | 重做第 3 步 |
+| `start.ps1` 执行策略错误 | PowerShell 策略过严 | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| 端口被占用 | 其他程序占用 8787/5173 | `Get-NetTCPConnection -LocalPort 8787,5173` 后结束对应 PID |
+| 访问 API 健康检查出现代理 **502** | 系统 HTTP 代理劫持了 localhost | 设置 `NO_PROXY=127.0.0.1,localhost`，或对本地地址关闭代理 |
+| 前端能开但接口失败 | API 未启动 / 地址不对 | 确认终端 1 在跑；访问 `/api/health` |
+| PDF 显示不支持 | 扫描件 / 纯图 PDF | 换用可选中文字的 born-digital PDF |
+| 翻译报错 | 密钥 / 模型 / Base URL 错误 | 在设置中修正后重新测试 |
+| 中文或公式显示被裁切 | 叠层与密排公式冲突 | 优先左右对照；公式区域保留 PDF 原图 |
+
+### 停止服务
+
+- **一键模式：** 关闭应用浏览器标签（自动关机），或结束启动用的 PowerShell。  
+- **手动模式：** 在各终端按 `Ctrl+C`。  
+- 也可先 `Get-NetTCPConnection -LocalPort 8787,5173`，再按 PID 结束进程。
+
+### `git pull` 之后如何更新
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+.\.venv\Scripts\pip.exe install -r requirements.txt
+
+cd "C:\Projects\Literature-Translator\apps\web"
+npm install
+```
+
+然后按第 5 步重新启动。
 
 ---
 
@@ -243,7 +481,7 @@ API 密钥只保存在本地 `data/`（本机密钥文件落盘混淆）。
 
 - 无云账号 / 多用户同步  
 - 无扫描件 OCR（会给出明确的不支持状态）  
-- 论文助手为请求–响应（v1 无流式）；每文档一条线程  
+- 论文助手为 **每文档一条线程**（当前界面已支持流式回复）  
 - 本版本不做图理解 / 视觉问答，也不做向量 RAG  
 - Word 导出为尽力而为的结构导出，非 PDF 像素级复刻  
 
@@ -252,11 +490,12 @@ API 密钥只保存在本地 `data/`（本机密钥文件落盘混淆）。
 ## 仓库结构
 
 ```
-Literature Translator/
+Literature-Translator/
 ├── apps/
 │   ├── api/          # FastAPI 后端
 │   └── web/          # Vue 3 前端
 ├── scripts/          # start.ps1 与诊断脚本
+├── picture/          # README 截图
 ├── docs/             # 设计说明与实现计划
 └── data/             # 运行时数据库与 PDF（本地，gitignore）
 ```
@@ -265,7 +504,12 @@ Literature Translator/
 
 ## 参与贡献
 
-欢迎改进解析质量、阅读体验、服务商兼容性与文档的 Issue / PR。请保持产品文案、代码与文档不出现本项目刻意回避的第三方产品中文品牌名。
+欢迎改进解析质量、阅读体验、服务商兼容性与文档的 Issue / PR：
+
+- [提交 Issue](https://github.com/chuqing-web/Literature-Translator/issues)
+- [提交 Pull Request](https://github.com/chuqing-web/Literature-Translator/pulls)
+
+请保持产品文案、代码与文档不出现本项目刻意回避的第三方产品中文品牌名。
 
 ---
 

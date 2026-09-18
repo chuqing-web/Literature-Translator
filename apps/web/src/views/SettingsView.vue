@@ -28,7 +28,7 @@ const form = reactive({
 const typography = reactive({
   font_family: 'Noto Serif SC, Source Han Serif SC, serif',
   font_size: 14,
-  line_height: 1.65,
+  line_height: 1.4,
   view_mode: 'embedded' as 'embedded' | 'side',
   locale: 'zh' as Locale,
 })

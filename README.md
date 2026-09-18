@@ -4,7 +4,14 @@
 
 A local-first bilingual PDF reader for researchers, graduate students, and anyone who needs to *understand* academic literature, not just machine-translate it. Upload a paper, keep the original layout, read paragraph-level translations beside the source, annotate as you go, and ask a paper-aware assistant when a method section gets dense.
 
+**Repository:** [github.com/chuqing-web/Literature-Translator](https://github.com/chuqing-web/Literature-Translator) · [Issues](https://github.com/chuqing-web/Literature-Translator/issues) · License [Apache-2.0](./LICENSE)
+
 [English](./README.md) · [中文](./README.zh-CN.md)
+
+```bash
+git clone https://github.com/chuqing-web/Literature-Translator.git
+cd Literature-Translator
+```
 
 ---
 
@@ -21,6 +28,18 @@ Upload papers, track ready status, and open any document from your on-disk libra
 Original PDF on the left, layout-aligned Chinese translation on the right, with margin notes and Paper Assistant in the rail.
 
 ![Reader — side-by-side translation with notes](./picture/reader-demo.png)
+
+### Provider settings
+
+Connect any OpenAI-compatible endpoint: presets, Base URL, model, API key, live URL preview, and a connection test before you translate.
+
+![Settings — translation provider profiles](./picture/settings-page.png)
+
+### Paper Assistant
+
+Ask questions grounded in the selected passage, the current page, or the full document — one continuous thread per paper, next to your notes.
+
+![Paper Assistant — scoped Q&A beside the reader](./picture/paper-assistant.png)
 
 ---
 
@@ -123,27 +142,157 @@ FastAPI on localhost:8787
 
 ## Requirements
 
-- **Windows** recommended for the one-click start script (`scripts/start.ps1`)  
-- **Python 3.11+** (API)  
-- **Node.js 18+** (Vite frontend)  
-- A **text-based PDF** (born-digital). Scanned/image-only PDFs are detected and marked unsupported in this version — OCR is not included yet  
-- An **OpenAI-compatible API** (or local model server) for translation and assistant  
+| Dependency | Version | Purpose |
+|------------|---------|---------|
+| OS | Windows 10/11 recommended | One-click `scripts/start.ps1`; macOS/Linux work via manual steps |
+| Git | 2.x | Clone the repository |
+| Python | **3.11+** (3.11 or 3.12 preferred) | FastAPI backend |
+| Node.js | **18+** (20 LTS recommended) | Vite + Vue frontend |
+| npm | Comes with Node.js | Frontend dependencies |
+| PDF input | Text-based (selectable) academic PDF | Scanned/image-only PDFs are unsupported (no OCR yet) |
+| AI endpoint | Any **OpenAI-compatible** Chat Completions API | Translation + Paper Assistant (cloud or local, e.g. Ollama gateway) |
+
+Optional: a local model server if you do not want a cloud API key.
 
 ---
 
-## Quick start
+## Deploy from zero (detailed)
 
-### Recommended (Windows)
+Follow this section if you have never run the project on this machine. Commands assume the repository root is:
 
-From the repository root:
+`C:\Projects\Literature-Translator`
+
+Adjust the path if yours differs. On macOS/Linux, use the equivalent shell commands (venv activate path differs).
+
+### Step 0 — Install system tools
+
+#### 0.1 Git
+
+1. Download Git for Windows: https://git-scm.com/download/win  
+2. Install with defaults.  
+3. Verify:
 
 ```powershell
+git --version
+```
+
+#### 0.2 Python 3.11+
+
+1. Download Python 3.11 or 3.12 from https://www.python.org/downloads/  
+2. **Important:** during setup, check **“Add python.exe to PATH”**.  
+3. Verify (either command is fine):
+
+```powershell
+python --version
+# or
+py -3.11 --version
+```
+
+You want `Python 3.11.x` or `3.12.x`. If `python` points to the Microsoft Store stub, use `py -3.11` in the steps below.
+
+#### 0.3 Node.js 18+
+
+1. Download the **LTS** installer from https://nodejs.org/  
+2. Install with defaults (includes npm).  
+3. Verify:
+
+```powershell
+node --version
+npm --version
+```
+
+### Step 1 — Get the source code
+
+If you already have the folder, skip to Step 2.
+
+```powershell
+cd C:\Projects
+git clone https://github.com/chuqing-web/Literature-Translator.git
+cd Literature-Translator
+```
+
+Or unzip a release archive into `C:\Projects\Literature-Translator` and `cd` into it.
+
+Confirm the tree looks like:
+
+```text
+Literature-Translator/
+├── apps/
+│   ├── api/
+│   └── web/
+├── scripts/
+│   └── start.ps1
+├── picture/
+├── README.md
+└── README.zh-CN.md
+```
+
+### Step 2 — Create the data directory (first run)
+
+Runtime files are written under `data/` (gitignored). Create it once if missing:
+
+```powershell
+cd "C:\Projects\Literature-Translator"
+New-Item -ItemType Directory -Force -Path .\data\library | Out-Null
+```
+
+On first API start the app will also create `data/lit.db` and a local key file automatically.
+
+### Step 3 — Backend: virtualenv + Python packages
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+
+# Create venv (prefer 3.11)
+py -3.11 -m venv .venv
+# If that fails, try:
+# python -m venv .venv
+
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+Verify uvicorn is available:
+
+```powershell
+.\.venv\Scripts\uvicorn.exe --version
+```
+
+### Step 4 — Frontend: npm packages
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\web"
+npm install
+```
+
+### Step 5 — Start the services
+
+#### Option A — One-click (Windows, recommended)
+
+From the **repository root**:
+
+```powershell
+cd "C:\Projects\Literature-Translator"
 .\scripts\start.ps1
 ```
 
-This starts the API and the Vite app and opens **http://127.0.0.1:5173/** .
+If PowerShell blocks scripts:
 
-**Closing the browser tab stops both frontend and backend** (heartbeat + shutdown beacon).
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Then re-run `.\scripts\start.ps1`.
+
+What the script does:
+
+1. Creates `apps/api/.venv` and installs `requirements.txt` if missing  
+2. Runs `npm install` in `apps/web` if `node_modules` is missing  
+3. Starts API on **http://127.0.0.1:8787**  
+4. Starts Vite on **http://127.0.0.1:5173**  
+5. Opens the browser to the app  
+
+**Default behavior:** closing the browser tab stops API + frontend (heartbeat / leave beacon).
 
 To keep servers running without a browser tab:
 
@@ -152,34 +301,123 @@ $env:LT_AUTO_SHUTDOWN = "0"
 .\scripts\start.ps1
 ```
 
-### Manual start
+#### Option B — Manual start (two terminals)
 
-**Backend**
+**Terminal 1 — API**
 
-```bash
-cd apps/api
-python3.11 -m venv .venv
-# Windows:
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8787
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+$env:LT_AUTO_SHUTDOWN = "0"
+.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8787
 ```
 
-**Frontend** (second terminal)
+Health check (another window):
+
+```powershell
+curl.exe http://127.0.0.1:8787/api/health
+```
+
+Expected JSON includes `"status":"ok"`.
+
+**Terminal 2 — Web**
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\web"
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Open **http://127.0.0.1:5173/** in the browser.
+
+#### macOS / Linux (manual)
 
 ```bash
+# Backend
+cd apps/api
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+LT_AUTO_SHUTDOWN=0 uvicorn app.main:app --host 127.0.0.1 --port 8787
+
+# Frontend (second terminal)
 cd apps/web
 npm install
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Open http://127.0.0.1:5173/ → **Settings** → add a provider → return to **Library** → upload a PDF → **Translate** → read.
+### Step 6 — First-time configuration in the UI
+
+1. Open http://127.0.0.1:5173/  
+2. Go to **Settings**  
+3. Add a provider:
+   - Pick a vendor preset **or** enter a custom Base URL  
+   - Enter **model** name and **API key** (for local Ollama-style servers, key can be a placeholder if the server ignores it)  
+   - Optionally enable **full URL mode** for non-standard gateways  
+   - Click **Test**, then set as **default**  
+4. Return to **Library** → **Upload PDF** (prefer a text-selectable academic PDF)  
+5. Open the document → **Translate** → wait for block progress  
+6. Choose **Embedded** or **Side-by-side** reading  
+7. Select a paragraph → use **Notes** or **Paper Assistant**  
+
+### Step 7 — Verify the deployment
+
+| Check | How | Expect |
+|-------|-----|--------|
+| API alive | `curl.exe http://127.0.0.1:8787/api/health` | `"status":"ok"` |
+| Web alive | Open http://127.0.0.1:5173/ | Library UI loads |
+| Provider | Settings → Test | Success |
+| Parse | Upload a text PDF | Status becomes ready / readable |
+| Translate | Reader → Translate | Blocks fill with target language |
+| Data on disk | Inspect `data/library/` and `data/lit.db` | PDF + SQLite present |
+
+### Ports & environment
+
+| Item | Default | Override |
+|------|---------|----------|
+| API | `127.0.0.1:8787` | `LT_API_HOST` / `LT_API_PORT` (via settings env prefix `LT_`) |
+| Web (Vite) | `127.0.0.1:5173` | Pass `--port` to `npm run dev` |
+| Auto-shutdown | on | `$env:LT_AUTO_SHUTDOWN = "0"` |
+| Data directory | `<repo>/data` | `LT_DATA_DIR` |
+
+If something else already uses 8787 or 5173, stop that process or change the port.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `python` / `py` not found | Python not on PATH | Reinstall Python with “Add to PATH”, or use full path to `python.exe` |
+| `npm` not found | Node not installed | Install Node.js LTS and reopen the terminal |
+| `uvicorn` missing | venv not created / deps not installed | Re-run Step 3 |
+| `start.ps1` execution policy error | PowerShell policy | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| Port already in use | Another app on 8787/5173 | `Get-NetTCPConnection -LocalPort 8787,5173` then stop the owning PID |
+| API health returns proxy **502** | System HTTP proxy intercepts localhost | Set `NO_PROXY=127.0.0.1,localhost` or disable proxy for local addresses |
+| Frontend loads but API calls fail | API not running / CORS / wrong host | Confirm Terminal 1 is up; open `/api/health` |
+| PDF marked unsupported | Scanned / image-only PDF | Use a born-digital, text-selectable PDF |
+| Translation errors | Bad key / model / Base URL | Fix provider in Settings → Test again |
+| Chinese glyphs look clipped | Overlay packing vs dense formulas | Prefer side-by-side; leave formula regions as PDF visuals |
+
+### Stop the services
+
+- **One-click mode:** close the app browser tab (auto-shutdown), or end the PowerShell launcher.  
+- **Manual mode:** `Ctrl+C` in each terminal.  
+- Or stop by PID after `Get-NetTCPConnection -LocalPort 8787,5173`.
+
+### Update after `git pull`
+
+```powershell
+cd "C:\Projects\Literature-Translator\apps\api"
+.\.venv\Scripts\pip.exe install -r requirements.txt
+
+cd "C:\Projects\Literature-Translator\apps\web"
+npm install
+```
+
+Then start again (Step 5).
 
 ---
 
 ## First 5 minutes
 
-1. **Add a provider** — Settings → choose a preset or custom Base URL + model + API key → Test → set as default  
+1. **Add a provider** — Settings → preset or custom Base URL + model + API key → Test → set as default  
 2. **Upload a paper** — Library → Upload PDF (prefer a text-selectable academic PDF)  
 3. **Translate** — open the reader → Translate; watch per-page / per-block progress  
 4. **Pick a view** — Embedded (translation under each block) or Side-by-side  
@@ -243,7 +481,7 @@ API keys are stored only under local `data/` (obfuscated at rest with a machine-
 
 - No cloud accounts / multi-user sync  
 - No OCR pipeline for scanned PDFs (unsupported with a clear status)  
-- Paper Assistant is request/response (no streaming in v1); one thread per document  
+- Paper Assistant keeps **one thread per document** (streaming replies are supported in the current UI)  
 - Vision / figure understanding and embedding RAG are out of scope for this version  
 - Word export is best-effort structure, not a pixel-perfect replica of the PDF  
 
@@ -252,11 +490,12 @@ API keys are stored only under local `data/` (obfuscated at rest with a machine-
 ## Project layout
 
 ```
-Literature Translator/
+Literature-Translator/
 ├── apps/
 │   ├── api/          # FastAPI backend
 │   └── web/          # Vue 3 frontend
 ├── scripts/          # start.ps1 and diagnostics
+├── picture/          # README screenshots
 ├── docs/             # design specs & plans
 └── data/             # runtime DB + PDFs (local, gitignored)
 ```
@@ -265,7 +504,12 @@ Literature Translator/
 
 ## Contributing
 
-Issues and PRs that improve parse quality, reading UX, provider compatibility, or documentation are welcome. Please keep product UI, code, and docs free of third-party product brand names that this project intentionally avoids referencing.
+Issues and PRs that improve parse quality, reading UX, provider compatibility, or documentation are welcome:
+
+- [Open an issue](https://github.com/chuqing-web/Literature-Translator/issues)
+- [Open a pull request](https://github.com/chuqing-web/Literature-Translator/pulls)
+
+Please keep product UI, code, and docs free of third-party product brand names that this project intentionally avoids referencing.
 
 ---
 

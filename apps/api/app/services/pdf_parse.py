@@ -29,9 +29,10 @@ class _RawBlock:
     font_size: float = 0.0
 
 
+from app.services.math_text import is_author_line_text, is_formula_like_text
+
 _CAPTION_RE = re.compile(r"^\s*(figure|fig\.|table|tab\.)\s*\d+", re.I)
 _CAPTION_NUM_RE = re.compile(r"^\s*(figure|fig\.|table|tab\.)\s*(\d+)", re.I)
-_FORMULA_HINT = re.compile(r"[=∫∑∏√≤≥±×÷]|\\frac|\\sum|\\begin\{")
 _ARXIV_RE = re.compile(r"arxiv\s*:", re.I)
 _HEADING_RE = re.compile(r"^(\d+(\.\d+)*|[IVXLC]+)\.\s+\S", re.I)
 _DROP_CAP_TAIL_RE = re.compile(r"^(?P<stem>.*?)(?:\n+|\s+)(?P<letter>[A-Za-z])\s*$", re.S)
@@ -421,7 +422,7 @@ def _classify(
         return "caption"
     if is_heading:
         return "heading"
-    if _FORMULA_HINT.search(text) and len(text) < 120:
+    if is_formula_like_text(text):
         return "formula_skip"
     if re.fullmatch(r"\d{1,3}", compact) and h < 22 and w < 48:
         return "skip"
@@ -437,6 +438,9 @@ def _classify(
         and y0 < 120
     ):
         return "title"
+    # Author name lists (keep Latin names — never translate)
+    if page_index == 0 and y0 < 220 and h < 40 and is_author_line_text(text):
+        return "meta"
     # Author / affiliation / link lines on the first page
     if (
         page_index == 0
@@ -454,30 +458,118 @@ def _classify(
     return "text"
 
 
+_SENTENCE_END_RE = re.compile(r"[.!?。！？][\"'”’)\]]*$")
+_LOWER_CONT_RE = re.compile(r"^[a-z\u00e0-\u00ff]")
+
+
+def _same_text_column(prev: _RawBlock, cur: _RawBlock) -> bool:
+    if abs(cur.x0 - prev.x0) > 28:
+        return False
+    overlap = min(prev.x1, cur.x1) - max(prev.x0, cur.x0)
+    return overlap >= 36
+
+
+def _is_wrapped_continuation(prev: _RawBlock, cur: _RawBlock) -> bool:
+    """True when `cur` is the next line of the same paragraph, not a new block.
+
+    PyMuPDF often emits the first wrapped line as its own block when the rest
+    of the paragraph is a taller block. Those must be joined.
+    """
+    if prev.block_type != "text" or cur.block_type != "text":
+        return False
+    gap = cur.y0 - prev.y1
+    if gap < -2 or gap > 14:
+        return False
+    if not _same_text_column(prev, cur):
+        return False
+    prev_text = (prev.text or "").rstrip()
+    cur_text = (cur.text or "").lstrip()
+    if not prev_text or not cur_text:
+        return False
+    if prev_text.endswith("-"):
+        return True
+    font = prev.font_size or cur.font_size or 10.0
+    prev_h = prev.y1 - prev.y0
+    one_line = prev_h < max(22.0, font * 1.9)
+    ends_sentence = bool(_SENTENCE_END_RE.search(prev_text))
+    starts_lower = bool(_LOWER_CONT_RE.match(cur_text))
+    # A short line that does not finish a sentence, sitting a line-gap above
+    # the next text, is a wrap — even when the next block is a tall paragraph.
+    if one_line and not ends_sentence and gap <= 10:
+        return True
+    if not ends_sentence and starts_lower and gap <= 10 and prev_h < 48:
+        return True
+    # Mid-sentence wrap: previous line ends with a connector word / comma.
+    if (
+        one_line
+        and gap <= 10
+        and (
+            prev_text.endswith(",")
+            or prev_text.endswith(";")
+            or prev_text.endswith(":")
+            or prev_text.lower().endswith(
+                (" to", " of", " the", " a", " an", " and", " or", " with", " for", " in", " by", " as")
+            )
+        )
+    ):
+        return True
+    return False
+
+
+def _merge_pair(prev: _RawBlock, cur: _RawBlock) -> None:
+    joiner = "" if (prev.text or "").rstrip().endswith("-") else " "
+    prev.text = f"{(prev.text or '').rstrip().rstrip('-')}{joiner}{(cur.text or '').lstrip()}".strip()
+    prev.x0 = min(prev.x0, cur.x0)
+    prev.y0 = min(prev.y0, cur.y0)
+    prev.x1 = max(prev.x1, cur.x1)
+    prev.y1 = max(prev.y1, cur.y1)
+    if cur.font_size:
+        prev.font_size = prev.font_size or cur.font_size
+
+
 def _merge_fragments(items: list[_RawBlock]) -> list[_RawBlock]:
+    """Join wrapped lines that PyMuPDF split into separate blocks.
+
+    Matching is per column so a right-column line cannot sit between two
+    left-column lines and block the merge.
+    """
     if not items:
         return []
-    merged: list[_RawBlock] = [items[0]]
-    for cur in items[1:]:
-        prev = merged[-1]
-        if prev.block_type != "text" or cur.block_type != "text":
-            merged.append(cur)
-            continue
-        gap = cur.y0 - prev.y1
-        same_column = abs(cur.x0 - prev.x0) < 28
-        similar_width = abs((cur.x1 - cur.x0) - (prev.x1 - prev.x0)) < 90
-        short_lines = (prev.y1 - prev.y0) < 24 and (cur.y1 - cur.y0) < 24
-        if same_column and similar_width and short_lines and -2 <= gap <= 12:
-            joiner = "" if prev.text.endswith("-") else " "
-            prev.text = f"{prev.text.rstrip('-')}{joiner}{cur.text}".strip()
-            prev.x0 = min(prev.x0, cur.x0)
-            prev.y0 = min(prev.y0, cur.y0)
-            prev.x1 = max(prev.x1, cur.x1)
-            prev.y1 = max(prev.y1, cur.y1)
-            if cur.font_size:
-                prev.font_size = prev.font_size or cur.font_size
+    page_w = max((it.x1 for it in items), default=0.0) or 1.0
+    merged: list[_RawBlock] = []
+    last_by_col: dict[str, _RawBlock] = {}
+
+    def column_of(block: _RawBlock) -> str:
+        w = block.x1 - block.x0
+        if w >= page_w * 0.55:
+            return "full"
+        cx = (block.x0 + block.x1) / 2.0
+        return "left" if cx < page_w / 2.0 else "right"
+
+    for cur in items:
+        col = column_of(cur)
+        prev = last_by_col.get(col)
+        gap = (cur.y0 - prev.y1) if prev else 99
+        same_column = prev is not None and abs(cur.x0 - prev.x0) < 28
+        similar_width = (
+            prev is not None and abs((cur.x1 - cur.x0) - (prev.x1 - prev.x0)) < 90
+        )
+        short_lines = (
+            prev is not None
+            and (prev.y1 - prev.y0) < 24
+            and (cur.y1 - cur.y0) < 24
+        )
+        if prev is not None and prev.block_type == "text" and cur.block_type == "text" and (
+            (same_column and similar_width and short_lines and -2 <= gap <= 12)
+            or _is_wrapped_continuation(prev, cur)
+        ):
+            _merge_pair(prev, cur)
             continue
         merged.append(cur)
+        last_by_col[col] = cur
+        if col == "full":
+            last_by_col["left"] = cur
+            last_by_col["right"] = cur
     return merged
 
 
@@ -917,3 +1009,103 @@ def parse_document(db: Session, document: Document) -> ParseResult:
 
     db.commit()
     return ParseResult(page_count, block_count, status, document.status_message)
+
+
+def repair_wrapped_paragraph_blocks(
+    db: Session,
+    document_id: str,
+    *,
+    page_index: int | None = None,
+) -> int:
+    """Join already-stored blocks that are one wrapped paragraph split by PyMuPDF.
+
+    Safe to call on every page load. Drops stale partial translations so the
+    joined paragraph can be translated as one unit.
+    """
+    from app.models import Highlight, Note, Translation
+
+    q = db.query(Block).filter(Block.document_id == document_id)
+    if page_index is not None:
+        q = q.filter(Block.page_index == page_index)
+    rows = q.order_by(Block.page_index, Block.bbox_y0, Block.bbox_x0).all()
+    if len(rows) < 2:
+        return 0
+
+    by_page: dict[int, list[Block]] = {}
+    for b in rows:
+        by_page.setdefault(b.page_index, []).append(b)
+
+    merged_n = 0
+    for _pi, page_rows in by_page.items():
+        page_w = max((b.page_width or 0.0) for b in page_rows) or max(
+            (b.bbox_x1 for b in page_rows), default=1.0
+        )
+        raws = [
+            _RawBlock(
+                b.bbox_x0,
+                b.bbox_y0,
+                b.bbox_x1,
+                b.bbox_y1,
+                b.text or "",
+                b.block_type or "text",
+                float(b.font_size or 0),
+            )
+            for b in page_rows
+        ]
+        last: dict[str, int] = {}
+
+        def column_of(i: int) -> str:
+            b = raws[i]
+            w = b.x1 - b.x0
+            if w >= page_w * 0.55:
+                return "full"
+            cx = (b.x0 + b.x1) / 2.0
+            return "left" if cx < page_w / 2.0 else "right"
+
+        i = 0
+        while i < len(page_rows):
+            col = column_of(i)
+            prev_i = last.get(col)
+            if prev_i is not None and _is_wrapped_continuation(raws[prev_i], raws[i]):
+                keep = page_rows[prev_i]
+                drop = page_rows[i]
+                _merge_pair(raws[prev_i], raws[i])
+                b = raws[prev_i]
+                keep.text = b.text
+                keep.bbox_x0 = b.x0
+                keep.bbox_y0 = b.y0
+                keep.bbox_x1 = b.x1
+                keep.bbox_y1 = b.y1
+                if b.font_size:
+                    keep.font_size = keep.font_size or b.font_size
+
+                keep_tr = (
+                    db.query(Translation).filter(Translation.block_id == keep.id).first()
+                )
+                if keep_tr and not keep_tr.edited:
+                    db.delete(keep_tr)
+                drop_tr = (
+                    db.query(Translation).filter(Translation.block_id == drop.id).first()
+                )
+                if drop_tr:
+                    db.delete(drop_tr)
+                db.query(Note).filter(Note.block_id == drop.id).update(
+                    {Note.block_id: keep.id}, synchronize_session=False
+                )
+                db.query(Highlight).filter(Highlight.block_id == drop.id).update(
+                    {Highlight.block_id: keep.id}, synchronize_session=False
+                )
+                db.delete(drop)
+                page_rows.pop(i)
+                raws.pop(i)
+                merged_n += 1
+                continue
+            last[col] = i
+            if col == "full":
+                last["left"] = i
+                last["right"] = i
+            i += 1
+
+    if merged_n:
+        db.commit()
+    return merged_n

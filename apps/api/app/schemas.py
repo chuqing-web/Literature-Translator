@@ -184,7 +184,7 @@ class AssistantThreadOut(BaseModel):
 
 class AssistantChatIn(BaseModel):
     content: str
-    context_mode: str = "auto"  # auto | full
+    context_mode: str = "auto"  # auto | block | page | full
     page_index: int = 0
     block_id: str | None = None
 

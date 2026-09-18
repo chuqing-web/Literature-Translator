@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -54,6 +56,64 @@ async def chat_completion(
         return data["choices"][0]["message"]["content"].strip()
 
 
+async def chat_completion_stream(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    is_full_url: bool = False,
+    temperature: float = 0.4,
+    timeout: float = 180.0,
+) -> AsyncIterator[str]:
+    """Yield text deltas from an OpenAI-compatible streaming chat completion."""
+    url = openai_chat_completions_url(base_url, is_full_url=is_full_url)
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "temperature": temperature,
+        "messages": messages,
+        "stream": True,
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            if resp.status_code in (401, 403):
+                body = (await resp.aread()).decode("utf-8", errors="replace")
+                raise ChatAuthError(
+                    f"Provider returned {resp.status_code}. Check Base URL, API key, and model in Settings."
+                    + (f" {body[:200]}" if body else "")
+                )
+            if resp.status_code >= 400:
+                body = (await resp.aread()).decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Provider returned {resp.status_code}. Check Base URL, API key, and model in Settings."
+                    + (f" {body[:300]}" if body else "")
+                )
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    if data == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    yield piece
+
+
 @dataclass
 class BuiltContext:
     mode: str  # block | page | full
@@ -103,9 +163,9 @@ def build_paper_context(
     page_index: int,
     block_id: str | None,
 ) -> BuiltContext:
-    """Resolve auto/full into block|page|full and return assembled text."""
+    """Resolve auto/full/page/block into block|page|full and return assembled text."""
     mode_req = (context_mode or "auto").strip().lower()
-    if mode_req not in ("auto", "full"):
+    if mode_req not in ("auto", "full", "page", "block"):
         mode_req = "auto"
 
     if mode_req == "full":
@@ -125,7 +185,8 @@ def build_paper_context(
             block_id=None,
         )
 
-    if block_id:
+    want_block = mode_req in ("auto", "block") and bool(block_id)
+    if want_block:
         block = (
             db.query(Block)
             .options(joinedload(Block.translation))
@@ -141,6 +202,9 @@ def build_paper_context(
                 page_index=block.page_index,
                 block_id=block.id,
             )
+        if mode_req == "block":
+            # Missing block — fall through to page scope.
+            pass
 
     page = max(0, int(page_index))
     blocks = (

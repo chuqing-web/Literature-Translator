@@ -1,5 +1,27 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
+/** Pull a readable message out of FastAPI / proxy error bodies. */
+export function formatApiError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  let detail = raw
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown }
+    if (typeof parsed.detail === 'string') detail = parsed.detail
+    else if (Array.isArray(parsed.detail)) {
+      detail = parsed.detail
+        .map((item) =>
+          typeof item === 'object' && item && 'msg' in item
+            ? String((item as { msg: unknown }).msg)
+            : String(item),
+        )
+        .join('; ')
+    }
+  } catch {
+    /* plain text */
+  }
+  return detail.replace(/^Assistant request failed:\s*/i, '').trim() || raw
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init)
   if (!res.ok) {
@@ -227,7 +249,7 @@ export const api = {
     id: string,
     body: {
       content: string
-      context_mode?: 'auto' | 'full'
+      context_mode?: 'auto' | 'block' | 'page' | 'full'
       page_index?: number
       block_id?: string | null
     },
@@ -237,4 +259,74 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+  /**
+   * Stream assistant reply via SSE.
+   * Events: user → delta* → done | error
+   */
+  chatAssistantStream: async (
+    id: string,
+    body: {
+      content: string
+      context_mode?: 'auto' | 'block' | 'page' | 'full'
+      page_index?: number
+      block_id?: string | null
+    },
+    handlers: {
+      onUser?: (msg: AssistantMessageItem) => void
+      onDelta?: (text: string) => void
+      onDone?: (msg: AssistantMessageItem) => void
+      onError?: (detail: string) => void
+    },
+    signal?: AbortSignal,
+  ) => {
+    const res = await fetch(`${API_BASE}/api/documents/${id}/assistant/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || res.statusText)
+    }
+    if (!res.body) throw new Error('No response body for stream')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    const handleEvent = (raw: string) => {
+      const dataLine = raw
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trim())
+        .join('')
+      if (!dataLine) return
+      let payload: {
+        type?: string
+        text?: string
+        detail?: string
+        message?: AssistantMessageItem
+      }
+      try {
+        payload = JSON.parse(dataLine)
+      } catch {
+        return
+      }
+      if (payload.type === 'user' && payload.message) handlers.onUser?.(payload.message)
+      else if (payload.type === 'delta' && payload.text) handlers.onDelta?.(payload.text)
+      else if (payload.type === 'done' && payload.message) handlers.onDone?.(payload.message)
+      else if (payload.type === 'error') handlers.onError?.(payload.detail || 'Stream error')
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+      for (const part of parts) handleEvent(part)
+    }
+    if (buffer.trim()) handleEvent(buffer)
+  },
 }
